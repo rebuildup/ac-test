@@ -27,12 +27,20 @@ struct SampleCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct GeneratedCase {
+    name: String,
+    input: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TestcaseRequest {
     contest: String,
     task: String,
     url: String,
     timelimit: String,
     cases: Vec<SampleCase>,
+    #[serde(default)]
+    generated: Vec<GeneratedCase>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +48,14 @@ struct SaveResponse {
     ok: bool,
     path: String,
     cases: usize,
+    generated: usize,
+    generated_dir: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    ok: bool,
+    error: String,
 }
 
 #[tokio::main]
@@ -66,9 +82,7 @@ async fn main() {
         .await
         .expect("failed to bind localhost");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server failed");
+    axum::serve(listener, app).await.expect("server failed");
 }
 
 fn parse_root() -> PathBuf {
@@ -76,10 +90,7 @@ fn parse_root() -> PathBuf {
 
     while let Some(arg) = args.next() {
         if arg == "--root" {
-            return PathBuf::from(
-                args.next()
-                    .expect("--root requires a path"),
-            );
+            return PathBuf::from(args.next().expect("--root requires a path"));
         }
 
         if let Some(value) = arg.strip_prefix("--root=") {
@@ -119,35 +130,35 @@ async fn save_testcases(
     Json(req): Json<TestcaseRequest>,
 ) -> impl IntoResponse {
     match write_testcases(&state.root, &req) {
-        Ok(path) => (
+        Ok(result) => (
             StatusCode::OK,
             Json(SaveResponse {
                 ok: true,
-                path: path.display().to_string(),
+                path: result.yaml_path.display().to_string(),
                 cases: req.cases.len(),
+                generated: req.generated.len(),
+                generated_dir: result.generated_dir.map(|p| p.display().to_string()),
             }),
         )
             .into_response(),
 
         Err(message) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json_error(message)),
+            Json(ErrorResponse {
+                ok: false,
+                error: message,
+            }),
         )
             .into_response(),
     }
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    ok: bool,
-    error: String,
+struct WriteResult {
+    yaml_path: PathBuf,
+    generated_dir: Option<PathBuf>,
 }
 
-fn serde_json_error(error: String) -> ErrorResponse {
-    ErrorResponse { ok: false, error }
-}
-
-fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<PathBuf, String> {
+fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<WriteResult, String> {
     validate_slug(&req.contest, "contest")?;
     validate_slug(&req.task, "task")?;
 
@@ -162,22 +173,58 @@ fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<PathBuf, String
         .map_err(|e| format!("failed to create {}: {e}", testcases_dir.display()))?;
 
     let alias = task_alias(&req.contest, &req.task)?;
-    let path = testcases_dir.join(format!("{alias}.yml"));
+    let yaml_path = testcases_dir.join(format!("{alias}.yml"));
     let yaml = render_yaml(req);
 
-    fs::write(&path, yaml)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    fs::write(&yaml_path, yaml)
+        .map_err(|e| format!("failed to write {}: {e}", yaml_path.display()))?;
 
-    Ok(path)
+    let generated_dir = if req.generated.is_empty() {
+        None
+    } else {
+        let dir = testcases_dir.join("generated").join(&alias);
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+
+        // Remove stale generated txt files so a changed statement does not leave old cases behind.
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) == Some("txt") {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+
+        for case in &req.generated {
+            validate_slug(&case.name, "generated testcase name")?;
+            let path = dir.join(format!("{}.txt", case.name));
+            fs::write(&path, ensure_trailing_newline(&case.input))
+                .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        }
+
+        Some(dir)
+    };
+
+    Ok(WriteResult {
+        yaml_path,
+        generated_dir,
+    })
+}
+
+fn ensure_trailing_newline(input: &str) -> String {
+    let mut out = input.replace("\r\n", "\n").replace('\r', "\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 fn resolve_contest_dir(root: &Path, contest: &str) -> Result<PathBuf, String> {
-    // 1. --root itself is the contest directory.
     if root.file_name().and_then(|x| x.to_str()) == Some(contest) {
         return Ok(root.to_path_buf());
     }
 
-    // 2. Normal cargo-compete layout: <root>/<contest>
     let direct = root.join(contest);
     if direct.is_dir() {
         return Ok(direct);
@@ -256,9 +303,10 @@ fn normalize_timelimit(value: &str) -> String {
 }
 
 fn yaml_plain_scalar(value: &str) -> String {
-    if value.bytes().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.')
-    }) && !value.is_empty()
+    if value
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+        && !value.is_empty()
     {
         value.into()
     } else {

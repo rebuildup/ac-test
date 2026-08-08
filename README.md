@@ -1,11 +1,13 @@
 # ac-test
 
-AtCoder の問題ページにあるサンプル入出力を、`cargo-compete` の
-`testcases/<task>.yml` へ自動保存します。
+AtCoder の問題ページから以下を自動取得する `cargo-compete` 補助ツールです。
+
+- サンプル入出力 → `testcases/<alias>.yml`
+- Level 1 の境界値 / stress 入力 → `testcases/generated/<alias>/*.txt`
 
 ## 配置
 
-`ac-test` を `cargo compete new` で作るコンテストディレクトリと同じ階層に置くのを基本とします。
+通常は `cargo-compete` のコンテスト群と同じ親ディレクトリに置きます。
 
 ```text
 atcoder/
@@ -15,122 +17,141 @@ atcoder/
 └─ ...
 ```
 
-この配置なら保存先ルートは `ac-test` から見て `../` なので、パス設定は不要です。
+この配置なら保存先 root はデフォルトの `../` でよいため、設定不要です。
 
-```text
-AtCoder problem page
-        │
-        │ GM_xmlhttpRequest
-        ▼
-http://127.0.0.1:27121
-        │
-        ▼
-../<contest>/testcases/<alias>.yml
-```
-
-たとえば `abc467_a` を開くと:
-
-```text
-../abc467/testcases/a.yml
-```
-
-が生成・更新されます。
-
-## 1. 起動
-
-`ac-test` ディレクトリでそのまま起動します。
+## 起動
 
 ```powershell
+cd ac-test
 cargo run --release
 ```
 
-デフォルトでは `../` をコンテストのルートとして使います。
-
-通常と違う配置にした場合だけ `--root` を指定できます。相対パスで構いません。
+必要な場合だけ root を変更できます。
 
 ```powershell
 cargo run --release -- --root ../../contests
 ```
 
-ポートのデフォルトは `27121` です。変更する場合:
+## Tampermonkey
 
-```powershell
-cargo run --release -- --port 27122
-```
+`ac-test.user.js` を Tampermonkey に登録してください。
 
-その場合は `ac-test.user.js` の `ENDPOINT` も同じポートへ変更してください。
+AtCoder の問題ページを開くと自動で localhost の bridge に送信します。
 
-### 動作確認
-
-```powershell
-Invoke-WebRequest http://127.0.0.1:27121/health
-```
-
-`ok` が返れば起動済みです。
-
-## 2. Tampermonkey
-
-`ac-test.user.js` を Tampermonkey の新規スクリプトへ貼り付けて保存します。
-
-対象ページ:
+右下の表示例:
 
 ```text
-https://atcoder.jp/contests/*/tasks/*
+ac-test: 3 samples + 5 stress
 ```
 
-問題ページを開くと自動的にサンプルを送信します。右下の表示で状態を確認できます。
+通常の sample は従来どおり:
 
-- `cargo: 3 samples saved` — 保存成功
-- `cargo: bridge offline` — `ac-test` が起動していない
-- `cargo: samples not found` — サンプルをDOMから取得できなかった
+```text
+abc467/testcases/a.yml
+```
 
-状態表示をクリックすると再送できます。
+Level 1 の生成入力は:
 
-## 3. cargo-compete
+```text
+abc467/testcases/generated/a/
+├─ min.txt
+├─ near-min.txt
+├─ near-max.txt
+├─ max.txt
+└─ random-max.txt
+```
 
-たとえば:
+## Level 1 が解釈する入力
+
+現在は、安全に機械生成しやすい以下に限定しています。
+
+### 整数スカラー
+
+```text
+N M
+```
+
+```text
+1 <= N <= 200000
+1 <= M <= 1000000000
+```
+
+### 一次元整数配列
+
+```text
+N
+A_1 A_2 ... A_N
+```
+
+```text
+1 <= N <= 200000
+1 <= A_i <= N
+```
+
+`A_i <= N` のような、別のスカラー変数に依存する上限にも対応します。
+
+### 生成パターン
+
+- `min`: 全変数を最小境界
+- `near-min`: `min + 1`
+- `near-max`: `max - 1`
+- `max`: 全変数を最大境界
+- `random-max`: 配列長などの構造サイズは最大、要素値は範囲内で疑似乱数
+
+乱数シードは固定なので、同じ問題なら再現可能です。
+
+## 対応しない場合
+
+文字列、グラフ、順列、二次元配列、複雑な相互制約など、Level 1 で有効入力だと保証できない場合は stress input を生成しません。
+
+その場合でも sample YAML は通常どおり保存され、右下は:
+
+```text
+ac-test: samples saved / stress unsupported
+```
+
+となります。
+
+ブラウザの Console には理由も表示します。
+
+## TLE / 実行時間チェック
+
+コンテストディレクトリから `stress.ps1` を使えます。
 
 ```powershell
 cd ../abc467
-cargo compete test a
+../ac-test/stress.ps1 a
 ```
 
-問題ページを開いた時点で `testcases/a.yml` が生成・更新されているため、手動でYAMLを書く必要はありません。
+`Cargo.toml` の `cargo-compete` metadata から alias `a` に対応する bin 名を自動取得し、release build したうえで生成ケースをすべて流します。
 
-## 生成するYAML
-
-```yaml
-# https://atcoder.jp/contests/abcXXX/tasks/abcXXX_a
----
-type: Batch
-timelimit: 2s
-match: Lines
-
-cases:
-  - name: sample1
-    in: |
-      ...
-    out: |
-      ...
-
-extend: []
-```
-
-## オプション
+例:
 
 ```text
---root <path>   コンテスト群のルート。省略時は ../
---port <port>   localhost のポート。省略時は 27121
+ac-test stress: a -> abc467-a
+local threshold: 2,000 ms (x1)
+building release...
+
+Case        Status TimeMs Exit
+----        ------ ------ ----
+max         OK      154.2    0
+min         OK        3.1    0
+near-max    OK      149.8    0
+near-min    OK        3.0    0
+random-max  OK      171.5    0
 ```
 
-`--root=../../contests`、`--port=27122` の形式でも指定できます。
+ローカル実行時間と AtCoder の実行環境は一致しないので、`OVER` / `TIMEOUT` は「TLEの可能性が高い」という警告として扱ってください。
 
-## 仕様
+少し余裕を持たせたい場合:
 
-- `127.0.0.1` のみに bind します。
-- 日本語の `入力例/出力例` と英語の `Sample Input/Sample Output` を認識します。
-- 同じ番号の日本語・英語サンプルは同じ `sampleN` として扱います。
-- `abc467_a` のような task id は `a.yml` に変換します。
-- 対象コンテストのディレクトリが存在しない場合は勝手に作らずエラーにします。
-- 出力比較は現在 `match: Lines` 固定です。
-- AtCoderへ追加のHTTPリクエストは送りません。表示中の問題文DOMだけを読み取ります。
+```powershell
+../ac-test/stress.ps1 a -LimitMultiplier 1.5
+```
+
+## Bridge
+
+- `127.0.0.1:27121` のみに bind
+- AtCoder へ追加リクエストは送らない
+- 表示中の問題文 DOM だけを解析
+- 保存先コンテストが存在しない場合は勝手に作らずエラー
