@@ -49,7 +49,6 @@ struct SaveResponse {
     path: String,
     cases: usize,
     generated: usize,
-    generated_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -92,7 +91,6 @@ fn parse_root() -> PathBuf {
         if arg == "--root" {
             return PathBuf::from(args.next().expect("--root requires a path"));
         }
-
         if let Some(value) = arg.strip_prefix("--root=") {
             return PathBuf::from(value);
         }
@@ -112,7 +110,6 @@ fn parse_port() -> u16 {
                 .parse()
                 .expect("invalid --port");
         }
-
         if let Some(value) = arg.strip_prefix("--port=") {
             return value.parse().expect("invalid --port");
         }
@@ -130,18 +127,16 @@ async fn save_testcases(
     Json(req): Json<TestcaseRequest>,
 ) -> impl IntoResponse {
     match write_testcases(&state.root, &req) {
-        Ok(result) => (
+        Ok(path) => (
             StatusCode::OK,
             Json(SaveResponse {
                 ok: true,
-                path: result.yaml_path.display().to_string(),
+                path: path.display().to_string(),
                 cases: req.cases.len(),
                 generated: req.generated.len(),
-                generated_dir: result.generated_dir.map(|p| p.display().to_string()),
             }),
         )
             .into_response(),
-
         Err(message) => (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -153,12 +148,7 @@ async fn save_testcases(
     }
 }
 
-struct WriteResult {
-    yaml_path: PathBuf,
-    generated_dir: Option<PathBuf>,
-}
-
-fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<WriteResult, String> {
+fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<PathBuf, String> {
     validate_slug(&req.contest, "contest")?;
     validate_slug(&req.task, "task")?;
 
@@ -168,56 +158,15 @@ fn write_testcases(root: &Path, req: &TestcaseRequest) -> Result<WriteResult, St
 
     let contest_dir = resolve_contest_dir(root, &req.contest)?;
     let testcases_dir = contest_dir.join("testcases");
-
     fs::create_dir_all(&testcases_dir)
         .map_err(|e| format!("failed to create {}: {e}", testcases_dir.display()))?;
 
     let alias = task_alias(&req.contest, &req.task)?;
     let yaml_path = testcases_dir.join(format!("{alias}.yml"));
-    let yaml = render_yaml(req);
-
-    fs::write(&yaml_path, yaml)
+    fs::write(&yaml_path, render_yaml(req))
         .map_err(|e| format!("failed to write {}: {e}", yaml_path.display()))?;
 
-    let generated_dir = if req.generated.is_empty() {
-        None
-    } else {
-        let dir = testcases_dir.join("generated").join(&alias);
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-
-        // Remove stale generated txt files so a changed statement does not leave old cases behind.
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|x| x.to_str()) == Some("txt") {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
-
-        for case in &req.generated {
-            validate_slug(&case.name, "generated testcase name")?;
-            let path = dir.join(format!("{}.txt", case.name));
-            fs::write(&path, ensure_trailing_newline(&case.input))
-                .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-        }
-
-        Some(dir)
-    };
-
-    Ok(WriteResult {
-        yaml_path,
-        generated_dir,
-    })
-}
-
-fn ensure_trailing_newline(input: &str) -> String {
-    let mut out = input.replace("\r\n", "\n").replace('\r', "\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    Ok(yaml_path)
 }
 
 fn resolve_contest_dir(root: &Path, contest: &str) -> Result<PathBuf, String> {
@@ -252,7 +201,6 @@ fn validate_slug(value: &str, label: &str) -> Result<(), String> {
 
 fn task_alias(contest: &str, task: &str) -> Result<String, String> {
     let prefix = format!("{contest}_");
-
     let alias = task
         .strip_prefix(&prefix)
         .or_else(|| task.rsplit_once('_').map(|(_, suffix)| suffix))
@@ -286,13 +234,23 @@ fn render_yaml(req: &TestcaseRequest) -> String {
         push_block(&mut yaml, &case.output, 6);
     }
 
+    // cargo-compete Case.out is optional. Generated Level-1 cases deliberately
+    // omit `out`, so `cargo compete test` still enforces timeout/runtime errors
+    // without pretending we know the correct answer for generated inputs.
+    for case in &req.generated {
+        yaml.push_str("  - name: generated-");
+        yaml.push_str(&yaml_plain_scalar(&case.name));
+        yaml.push('\n');
+        yaml.push_str("    in: |\n");
+        push_block(&mut yaml, &case.input, 6);
+    }
+
     yaml.push_str("\nextend: []\n");
     yaml
 }
 
 fn normalize_timelimit(value: &str) -> String {
     let trimmed = value.trim();
-
     if trimmed.is_empty() {
         "2s".into()
     } else if trimmed.ends_with('s') {
