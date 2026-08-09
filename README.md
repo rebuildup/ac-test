@@ -1,9 +1,11 @@
 # ac-test
 
-AtCoder の問題ページから以下を自動取得する `cargo-compete` 補助ツールです。
+AtCoder の問題ページからテストケースを取得・生成し、`cargo-compete` の `testcases/<alias>.yml` にまとめて保存する補助ツールです。
 
-- サンプル入出力 → `testcases/<alias>.yml`
-- Level 1 の境界値 / stress 入力 → `testcases/generated/<alias>/*.txt`
+- サンプル入出力を自動取得
+- Level 1 の境界値 / stress 入力を自動生成
+- すべて同じ `a.yml` の `cases:` に保存
+- `cargo compete test a` 1回でまとめて実行
 
 ## 配置
 
@@ -17,7 +19,7 @@ atcoder/
 └─ ...
 ```
 
-この配置なら保存先 root はデフォルトの `../` でよいため、設定不要です。
+この配置なら保存先 root はデフォルトの `../` なので設定不要です。
 
 ## 起動
 
@@ -36,30 +38,67 @@ cargo run --release -- --root ../../contests
 
 `ac-test.user.js` を Tampermonkey に登録してください。
 
-AtCoder の問題ページを開くと自動で localhost の bridge に送信します。
+AtCoder の問題ページを開くと、表示中の問題文 DOM からサンプル・制約・入力形式を読み取り、localhost の bridge に送信します。
 
-右下の表示例:
+成功時の右下表示例:
 
 ```text
 ac-test: 3 samples + 5 stress
 ```
 
-通常の sample は従来どおり:
+生成先は1ファイルだけです。
 
 ```text
 abc467/testcases/a.yml
 ```
 
-Level 1 の生成入力は:
+例:
 
-```text
-abc467/testcases/generated/a/
-├─ min.txt
-├─ near-min.txt
-├─ near-max.txt
-├─ max.txt
-└─ random-max.txt
+```yaml
+---
+type: Batch
+timelimit: 2s
+match: Lines
+
+cases:
+  - name: sample1
+    in: |
+      3
+      1 2 3
+    out: |
+      6
+
+  - name: generated-min
+    in: |
+      1
+      1
+
+  - name: generated-max
+    in: |
+      200000
+      ...
+
+extend: []
 ```
+
+`generated-*` のケースでは `out` を意図的に省略します。`cargo-compete` の `Case.out` は optional なので、正解出力が分からない自動生成入力でも実行できます。これにより生成ケースでは出力比較を行わず、主に TLE・RE・panic などを確認できます。
+
+## テスト
+
+通常どおり1コマンドです。
+
+```powershell
+cargo compete test a
+```
+
+これで以下をまとめて実行します。
+
+- `sample1`, `sample2`, ...: 正解出力と比較
+- `generated-min`: 最小境界
+- `generated-near-min`: 最小境界 + 1
+- `generated-near-max`: 最大境界 - 1
+- `generated-max`: 最大境界
+- `generated-random-max`: 構造サイズ最大 + 範囲内疑似乱数
 
 ## Level 1 が解釈する入力
 
@@ -98,56 +137,19 @@ A_1 A_2 ... A_N
 - `max`: 全変数を最大境界
 - `random-max`: 配列長などの構造サイズは最大、要素値は範囲内で疑似乱数
 
-乱数シードは固定なので、同じ問題なら再現可能です。
+乱数シードは固定なので同じ問題なら再現可能です。
 
 ## 対応しない場合
 
-文字列、グラフ、順列、二次元配列、複雑な相互制約など、Level 1 で有効入力だと保証できない場合は stress input を生成しません。
+文字列、グラフ、順列、二次元配列、複雑な相互制約など、Level 1 で有効入力だと保証できない場合は生成ケースを追加しません。
 
-その場合でも sample YAML は通常どおり保存され、右下は:
+その場合でもサンプルは通常どおり `a.yml` に保存され、右下に:
 
 ```text
 ac-test: samples saved / stress unsupported
 ```
 
-となります。
-
-ブラウザの Console には理由も表示します。
-
-## TLE / 実行時間チェック
-
-コンテストディレクトリから `stress.ps1` を使えます。
-
-```powershell
-cd ../abc467
-../ac-test/stress.ps1 a
-```
-
-`Cargo.toml` の `cargo-compete` metadata から alias `a` に対応する bin 名を自動取得し、release build したうえで生成ケースをすべて流します。
-
-例:
-
-```text
-ac-test stress: a -> abc467-a
-local threshold: 2,000 ms (x1)
-building release...
-
-Case        Status TimeMs Exit
-----        ------ ------ ----
-max         OK      154.2    0
-min         OK        3.1    0
-near-max    OK      149.8    0
-near-min    OK        3.0    0
-random-max  OK      171.5    0
-```
-
-ローカル実行時間と AtCoder の実行環境は一致しないので、`OVER` / `TIMEOUT` は「TLEの可能性が高い」という警告として扱ってください。
-
-少し余裕を持たせたい場合:
-
-```powershell
-../ac-test/stress.ps1 a -LimitMultiplier 1.5
-```
+と表示します。ブラウザの Console にはスキップ理由も表示します。
 
 ## Bridge
 
